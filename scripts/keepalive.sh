@@ -3,7 +3,7 @@
 # plan, Operations, Alerts: "GitHub disables scheduled workflows in a public
 # repository after 60 days without repository activity ... so the monthly
 # privileged-access review pushes a keepalive commit to
-# Zeyadigital/EmDashFleet-Watch"; internal documentation plan, Runbooks,
+# emdashfleet/EmDashFleet-Watch"; internal documentation plan, Runbooks,
 # Monthly privileged-access review and Re-enable the outside watch; tracker
 # APC-031). The co-founder who runs the review runs this script on day 1 of
 # each month from a terminal signed in to GitHub with their own login.
@@ -12,7 +12,7 @@
 #                                  [--dry-run] [--check-state]
 #
 # --remote       the repository to push to (default
-#                https://github.com/Zeyadigital/EmDashFleet-Watch.git); the
+#                https://github.com/emdashfleet/EmDashFleet-Watch.git); the
 #                tests pass a local bare repository;
 # --branch       the branch to commit to (default main, the branch the
 #                scheduled workflows run from);
@@ -21,7 +21,7 @@
 #                accepted);
 # --check-state  after the push, or after the commit of a dry run, reads the
 #                state of watch.yml and watch-staging.yml with
-#                `gh api --hostname github.com repos/Zeyadigital/EmDashFleet-Watch/actions/workflows/<file>`
+#                `gh api --hostname github.com repos/emdashfleet/EmDashFleet-Watch/actions/workflows/<file>`
 #                and fails unless both are active. It always reads the public
 #                repository, so it is refused (exit 2, before any clone) with a
 #                --remote other than the default.
@@ -54,7 +54,7 @@ set -uo pipefail
 # configuration (security audit of 2026-11-21, Watch S7).
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_COMMON_DIR GIT_CONFIG_COUNT
 
-remote="https://github.com/Zeyadigital/EmDashFleet-Watch.git"
+remote="https://github.com/emdashfleet/EmDashFleet-Watch.git"
 default_remote="$remote"
 branch="main"
 dry_run=0
@@ -134,7 +134,7 @@ sha="$(git -C "$repo" rev-parse --short=12 HEAD)"
 check_workflows() {
   local file state failed=0
   for file in watch.yml watch-staging.yml; do
-    state="$(gh api --hostname github.com "repos/Zeyadigital/EmDashFleet-Watch/actions/workflows/$file" --jq .state 2>/dev/null)" || die "The state of $file could not be read with gh."
+    state="$(gh api --hostname github.com "repos/emdashfleet/EmDashFleet-Watch/actions/workflows/$file" --jq .state 2>/dev/null)" || die "The state of $file could not be read with gh."
     echo "$file state: $state"
     [ "$state" = "active" ] || { echo "$file is not active. Run the runbook Re-enable the outside watch."; failed=1; }
   done

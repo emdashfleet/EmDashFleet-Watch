@@ -11,7 +11,7 @@ import { after, before, describe, test } from "node:test";
 import { ROOT } from "./helpers.mjs";
 
 const SCRIPT = join(ROOT, "scripts", "keepalive.sh");
-const DEFAULT_REMOTE = "https://github.com/Zeyadigital/EmDashFleet-Watch.git";
+const DEFAULT_REMOTE = "https://github.com/emdashfleet/EmDashFleet-Watch.git";
 let dir;
 let bare;
 let config;
@@ -199,7 +199,7 @@ describe("keepalive.sh", () => {
     assert.equal(state.output, "--check-state reads the public repository and needs the default remote; run it without --remote.");
     const dry = keepalive(["--dry-run", "--check-state"], { remote: bare });
     assert.equal(dry.code, 2, "a dry run is refused too");
-    for (const remote of ["https://token@github.com/Zeyadigital/EmDashFleet-Watch.git", "https://user:secret@github.com/x/y.git", "ssh://git@github.com/x/y.git", "https://@github.com/x/y.git"]) {
+    for (const remote of ["https://token@github.com/emdashfleet/EmDashFleet-Watch.git", "https://user:secret@github.com/x/y.git", "ssh://git@github.com/x/y.git", "https://@github.com/x/y.git"]) {
       const { code, output } = keepalive(["--dry-run"], { remote });
       assert.equal(code, 2, remote);
       assert.equal(output, "The remote holds user information. Remove it; the sign-in of gh or the credential helper of git supplies the credential.");
@@ -252,13 +252,13 @@ describe("keepalive.sh", () => {
     assert.match(dry.output, /nothing was pushed\.\nwatch\.yml state: disabled_inactivity/);
     assert.equal(bareGit("rev-parse", "main"), before);
     const lines = readFileSync(calls, "utf8");
-    assert.match(lines, /^api --hostname github\.com repos\/Zeyadigital\/EmDashFleet-Watch\/actions\/workflows\/watch\.yml --jq \.state$/m);
-    assert.match(lines, /^api --hostname github\.com repos\/Zeyadigital\/EmDashFleet-Watch\/actions\/workflows\/watch-staging\.yml --jq \.state$/m);
+    assert.match(lines, /^api --hostname github\.com repos\/emdashfleet\/EmDashFleet-Watch\/actions\/workflows\/watch\.yml --jq \.state$/m);
+    assert.match(lines, /^api --hostname github\.com repos\/emdashfleet\/EmDashFleet-Watch\/actions\/workflows\/watch-staging\.yml --jq \.state$/m);
   });
 
   test("the default remote is the public repository, and the script never forces a push", () => {
     const script = readFileSync(SCRIPT, "utf8");
-    assert.match(script, /^remote="https:\/\/github\.com\/Zeyadigital\/EmDashFleet-Watch\.git"$/m);
+    assert.match(script, /^remote="https:\/\/github\.com\/emdashfleet\/EmDashFleet-Watch\.git"$/m);
     assert.doesNotMatch(script.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n"), /--force|push -f|\+HEAD|--no-verify/);
   });
 
