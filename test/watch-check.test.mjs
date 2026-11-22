@@ -79,7 +79,7 @@ describe("two failed attempts", () => {
     assert.match(text, /\(HTTP 500, then HTTP 502\)/);
     assert.match(text, /Environment: production\./);
     assert.match(text, /Runbook: Roll back a Fleet deploy\./);
-    assert.match(text, /Run: https:\/\/github\.com\/Zeyadigital\/EmDashFleet-Watch\/actions\/runs\/123456789$/);
+    assert.match(text, /Run: https:\/\/github\.com\/emdashfleet\/EmDashFleet-Watch\/actions\/runs\/123456789$/);
     assert.match(output, /alert post: HTTP 200/);
   });
 

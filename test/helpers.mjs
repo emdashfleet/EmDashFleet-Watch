@@ -114,7 +114,7 @@ export const testEnv = (target, hook, extra = {}) => ({
   WATCH_WEBHOOK: hook.url,
   WATCH_ENVIRONMENT: "production",
   GITHUB_SERVER_URL: "https://github.com",
-  GITHUB_REPOSITORY: "Zeyadigital/EmDashFleet-Watch",
+  GITHUB_REPOSITORY: "emdashfleet/EmDashFleet-Watch",
   GITHUB_RUN_ID: "123456789",
   ...extra,
 });
