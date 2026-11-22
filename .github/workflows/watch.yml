@@ -36,6 +36,7 @@ name: watch
 
 on:
   schedule:
+    # Edited 2026-11-22 so GitHub registers the schedule again: no scheduled run had started since the repository was created.
     # Every 15 minutes, at minutes 7,22,37,52: GitHub documents the start of every
     # hour as a high-load time at which a scheduled run can be delayed or
     # dropped and advises "a different time of the hour"
