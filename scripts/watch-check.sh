@@ -28,7 +28,7 @@
 #   webhook and exits 1, so the run fails and GitHub emails the co-founder who
 #   last changed the schedule. Every later failing run posts again.
 # - The repository is public, so the run log holds nothing but each URL's HTTP
-#   status ("no answer" when none arrived) and the status of the webhook post.
+#   status ("no answer" and the exit number of the transfer when none arrived) and the status of the webhook post.
 #   curl's stderr is discarded because it can quote the URL. The token and the
 #   webhook reach curl through stdin, never through an argument or the log.
 # - A missing or malformed setting stops the run with exit 2 before any request,
@@ -140,10 +140,11 @@ attempt() {
   local n="$1"
   rm -f "$work/body"
   local common=(-q --noproxy '*' --silent --globoff --max-time "$timeout" --max-redirs 0 --max-filesize 1048576 --proto "$proto" --output "$work/body" --write-out '%{http_code}')
+  local rc=0
   if [ "$kind" = "healthz" ] && [ -n "$token" ]; then
-    code="$(printf 'Authorization: Bearer %s\n' "$token" | curl "${common[@]}" --header @- "$url" 2>/dev/null)" || code=000
+    code="$(printf 'Authorization: Bearer %s\n' "$token" | curl "${common[@]}" --header @- "$url" 2>/dev/null)" || { rc=$?; code=000; }
   else
-    code="$(curl "${common[@]}" "$url" 2>/dev/null)" || code=000
+    code="$(curl "${common[@]}" "$url" 2>/dev/null)" || { rc=$?; code=000; }
   fi
   case "$code" in [0-9][0-9][0-9]) ;; *) code=000 ;; esac
   stale=0
@@ -152,7 +153,14 @@ attempt() {
   if [ "$code" = "503" ] && [ "$kind" = "healthz" ] && printf 'cron_stale' | cmp -s - "$work/body"; then
     stale=1
   fi
-  if [ "$code" = "000" ]; then echo "$kind attempt $n: no answer"; else echo "$kind attempt $n: HTTP $code"; fi
+  # curl's own exit status is a number and quotes nothing, so the public log may carry it: 6 no
+  # DNS answer, 7 no connection, 28 timeout, 35 or 60 a TLS failure, 63 a body past 1 MiB. Without
+  # it a run that "got no answer" in under a second cannot be told from one that waited 10 seconds.
+  if [ "$code" = "000" ]; then
+    if [ "$rc" != "0" ]; then echo "$kind attempt $n: no answer (curl_exit=$rc)"; else echo "$kind attempt $n: no answer"; fi
+  else
+    echo "$kind attempt $n: HTTP $code"
+  fi
 }
 
 describe() {

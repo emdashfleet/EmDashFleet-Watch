@@ -135,7 +135,7 @@ describe("two failed attempts", () => {
     assert.equal(code, 1);
     assert.ok(Date.now() - started < 5000, "the script waited for the slow answer");
     assert.equal(target.requests.length, 2);
-    assert.match(output, /healthz attempt 1: no answer\nhealthz attempt 2: no answer/);
+    assert.match(output, /healthz attempt 1: no answer \(curl_exit=28\)\nhealthz attempt 2: no answer \(curl_exit=28\)/);
     assert.match(postedText(hook.posts[0]), /\(no answer, then no answer\)/);
   });
 
@@ -148,7 +148,7 @@ describe("two failed attempts", () => {
     assert.equal(code, 1);
     assert.ok(Date.now() - started < 5000, "the script waited for the stalled body");
     assert.equal(target.requests.length, 2);
-    assert.match(output, /healthz attempt 1: no answer\nhealthz attempt 2: no answer/);
+    assert.match(output, /healthz attempt 1: no answer \(curl_exit=28\)\nhealthz attempt 2: no answer \(curl_exit=28\)/);
     assert.match(postedText(hook.posts[0]), /\(no answer, then no answer\)/);
   });
 
@@ -157,7 +157,7 @@ describe("two failed attempts", () => {
     const { code, output } = await runCheck("healthz", testEnv(target, hook));
     assert.equal(code, 1);
     assert.equal(target.requests.length, 2);
-    assert.match(output, /healthz attempt 1: no answer\nhealthz attempt 2: no answer/);
+    assert.match(output, /healthz attempt 1: no answer \(curl_exit=63\)\nhealthz attempt 2: no answer \(curl_exit=63\)/);
     assert.equal(hook.posts.length, 1);
     assert.match(postedText(hook.posts[0]), /^<!channel> A21 /);
   });
