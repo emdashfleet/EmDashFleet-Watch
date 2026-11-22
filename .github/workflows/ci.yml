@@ -106,7 +106,7 @@ jobs:
           # used, and test/hygiene.test.mjs fails when a file holds the comment.
           "$RUNNER_TEMP/gitleaks" git --redact --no-banner --ignore-gitleaks-allow --verbose --log-opts="$log_opts" .
 
-      # No lockfile and no dependency: no cache and no install. Node.js 26.13.0
+      # No lockfile and no dependency: no cache and no install. Node.js 26.13.1
       # bundles the npm that runs the tests.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:

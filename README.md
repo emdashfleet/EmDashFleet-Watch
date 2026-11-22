@@ -49,4 +49,4 @@ Why this order: a job that references an environment that does not exist creates
 
 ## Tests
 
-The tests need Node.js 26.13.0 or newer (`.nvmrc`) and no package: `npm test` runs `node --test "test/*.test.mjs"`. They run the check script against a local HTTP server and a stub webhook, parse the workflow files and check the hygiene files (`test/hygiene.test.mjs`). They never reach a real address or a real webhook.
+The tests need Node.js 26.13.1 or newer (`.nvmrc`) and no package: `npm test` runs `node --test "test/*.test.mjs"`. They run the check script against a local HTTP server and a stub webhook, parse the workflow files and check the hygiene files (`test/hygiene.test.mjs`). They never reach a real address or a real webhook.
