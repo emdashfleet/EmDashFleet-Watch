@@ -1,0 +1,94 @@
+# The outside watch of Fleet's staging environment (EmDash Fleet app plan,
+# Operations, Alerts; alert A53 rehearsal and the outside watch test of
+# Testing; pre-mortem PM-AP-31; tracker APC-032). It is identical to watch.yml
+# except for the values below, and runs the same script, scripts/watch-check.sh:
+#   healthz        https://staging.emdashfleet.com/healthz with the Bearer
+#                  token WATCH_CHECKIN_TOKEN_STAGING, the Worker secret of
+#                  fleet-dashboard-staging, so a run writes the cron_checkin
+#                  row watch.yml in the staging fleet-core;
+#   landing page   the staging landing site at the workers.dev address held in
+#                  the repository variable STAGING_SITE_URL;
+#   alerts         posted through the Incoming Webhook
+#                  SLACK_WATCH_WEBHOOK_URL_STAGING to #fleet-alerts-staging and
+#                  never to #fleet-alerts; this file names no production
+#                  secret (test/workflows.test.mjs checks it).
+# A check fails on a status other than 200 or on no answer within 10 seconds
+# and is repeated once 5 minutes later; when both attempts fail the step posts
+# and exits non-zero, so the run fails and GitHub emails the co-founder who
+# last changed the schedule. Every later failing run posts again; no recovery
+# message is posted.
+#
+# The Actions log of this public repository shows the value of
+# STAGING_SITE_URL in the env: block of the landing page step; the variable
+# holds a public staging address and nothing secret. The scripts folder is
+# fetched with the runner's own git, without a token, and the job runs no
+# action.
+#
+# The job references the GitHub environment staging (HR-221). The two secrets
+# above are secrets of that environment, which limits its deployment branches
+# to main and dev, and no repository secret holds them: a run of any other
+# branch is not allowed to deploy to the environment and so does not get
+# them. GitHub runs a schedule from main, so main must be allowed; dev is
+# allowed so that a manual dispatch from dev can test a change (README,
+# Secrets and environments).
+name: watch-staging
+
+on:
+  schedule:
+    # Every 15 minutes, at minutes 12,27,42,57: GitHub documents the start of every
+    # hour as a high-load time at which a scheduled run can be delayed or
+    # dropped and advises "a different time of the hour"
+    # (https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule),
+    # so no minute is 0. The two workflows use different minutes.
+    - cron: "12,27,42,57 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run of this workflow at a time: a manual dispatch inside the window of a
+# run in progress, or two delayed scheduled runs that start together, would
+# otherwise post <!channel> twice and write two check-ins. cancel-in-progress
+# is false, so a run in progress is never cancelled; a newer run waits, and
+# GitHub keeps at most one run pending in the group and replaces an older
+# pending run by the newer one, which suits a live probe (workflow syntax,
+# concurrency:
+# https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax).
+concurrency:
+  group: watch-staging
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    # The environment that holds the two secrets of this job and limits the
+    # branches that may use them (HR-221).
+    environment: staging
+    timeout-minutes: 15
+    steps:
+      # The scripts folder of the commit this run is for, fetched with the
+      # runner's own git instead of an action, so no third-party code runs in
+      # the job that holds the secrets (security audit of 2026-11-21, Watch
+      # S12). The repository is public, so the fetch needs no token; GitHub
+      # serves a fetch by commit SHA, which actions/checkout uses as well.
+      - run: |
+          git init -q .
+          git remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          git -c protocol.version=2 fetch -q --no-tags --depth 1 origin "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD -- scripts
+
+      - name: healthz
+        env:
+          WATCH_URL: https://staging.emdashfleet.com/healthz
+          WATCH_TOKEN: ${{ secrets.WATCH_CHECKIN_TOKEN_STAGING }}
+          WATCH_WEBHOOK: ${{ secrets.SLACK_WATCH_WEBHOOK_URL_STAGING }}
+          WATCH_ENVIRONMENT: staging
+        run: bash scripts/watch-check.sh healthz
+
+      - name: landing page
+        if: ${{ !cancelled() }}
+        env:
+          WATCH_URL: ${{ vars.STAGING_SITE_URL }}
+          WATCH_WEBHOOK: ${{ secrets.SLACK_WATCH_WEBHOOK_URL_STAGING }}
+          WATCH_ENVIRONMENT: staging
+        run: bash scripts/watch-check.sh landing

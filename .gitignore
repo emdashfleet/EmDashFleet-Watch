@@ -1,0 +1,9 @@
+# Files that hold a secret or that npm and the tools create locally. The only
+# secret control of this public repository is the gitleaks scan of ci.yml, which
+# runs after the push, so this file keeps such a file out of git add -A first
+# (security audit of 2026-11-21, Watch S11). test/hygiene.test.mjs pins these
+# four entries.
+.env*
+.dev.vars*
+node_modules/
+*.log
