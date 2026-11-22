@@ -1,0 +1,448 @@
+// Tests of scripts/watch-check.sh against a local HTTP server and a stub
+// Incoming Webhook (tracker APC-030, APC-032). Run with `npm test`.
+import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, test } from "node:test";
+import { CHECK_SCRIPT, HOOK_SECRET, TOKEN, postedText, runCheck, startHook, startTarget, stubCurl, testEnv } from "./helpers.mjs";
+
+const open = [];
+async function setup(responses, hookStatus = 200) {
+  const target = await startTarget(responses);
+  const hook = await startHook(hookStatus);
+  open.push(target, hook);
+  return { target, hook };
+}
+afterEach(async () => {
+  while (open.length > 0) await open.pop().close();
+});
+
+describe("a healthy run", () => {
+  test("posts nothing, exits 0 and sends the Bearer token on /healthz", async () => {
+    const { target, hook } = await setup([{ status: 200, body: "ok" }]);
+    const { code, output } = await runCheck("healthz", testEnv(target, hook));
+    assert.equal(code, 0);
+    assert.equal(hook.posts.length, 0);
+    assert.equal(target.requests.length, 1);
+    assert.equal(target.requests[0].authorization, `Bearer ${TOKEN}`);
+    assert.equal(output.trim(), "healthz attempt 1: HTTP 200");
+  });
+
+  test("the landing page check sends no Authorization header", async () => {
+    const { target, hook } = await setup([{ status: 200 }]);
+    const { code } = await runCheck("landing", testEnv(target, hook, { WATCH_TOKEN: "" }));
+    assert.equal(code, 0);
+    assert.equal(target.requests[0].authorization, null);
+  });
+
+  // The landing page is public: the token of the step environment never reaches it, even when
+  // one is set, on the first attempt, on the retry or in the alert (security audit of 2026-11-21,
+  // Watch S9 c).
+  test("the landing page check sends no Authorization header even when a token is set", async () => {
+    const { target, hook } = await setup([{ status: 500 }, { status: 200 }]);
+    const { code, output } = await runCheck("landing", testEnv(target, hook, { WATCH_TOKEN: TOKEN }));
+    assert.equal(code, 0);
+    assert.equal(target.requests.length, 2);
+    assert.deepEqual(target.requests.map((request) => request.authorization), [null, null]);
+    assert.ok(!output.includes(TOKEN));
+  });
+
+  test("a second attempt that answers 200 posts nothing and exits 0", async () => {
+    const { target, hook } = await setup([{ status: 500 }, { status: 200 }]);
+    const { code, output } = await runCheck("healthz", testEnv(target, hook));
+    assert.equal(code, 0);
+    assert.equal(target.requests.length, 2);
+    assert.equal(hook.posts.length, 0);
+    assert.equal(output.trim(), "healthz attempt 1: HTTP 500\nhealthz attempt 2: HTTP 200");
+  });
+
+  test("a cron_stale answer followed by 200 posts nothing", async () => {
+    const { target, hook } = await setup([{ status: 503, body: "cron_stale" }, { status: 200 }]);
+    const { code } = await runCheck("healthz", testEnv(target, hook));
+    assert.equal(code, 0);
+    assert.equal(hook.posts.length, 0);
+  });
+});
+
+describe("two failed attempts", () => {
+  test("healthz posts A21 with <!channel> once and exits non-zero", async () => {
+    const { target, hook } = await setup([{ status: 500 }, { status: 502 }]);
+    const { code, output } = await runCheck("healthz", testEnv(target, hook));
+    assert.equal(code, 1);
+    assert.equal(target.requests.length, 2);
+    assert.equal(hook.posts.length, 1);
+    assert.equal(hook.posts[0].method, "POST");
+    assert.equal(hook.posts[0].contentType, "application/json");
+    const text = postedText(hook.posts[0]);
+    assert.match(text, /^<!channel> A21 \(S1\): /);
+    assert.match(text, /\(HTTP 500, then HTTP 502\)/);
+    assert.match(text, /Environment: production\./);
+    assert.match(text, /Runbook: Roll back a Fleet deploy\./);
+    assert.match(text, /Run: https:\/\/github\.com\/Zeyadigital\/EmDashFleet-Watch\/actions\/runs\/123456789$/);
+    assert.match(output, /alert post: HTTP 200/);
+  });
+
+  test("the landing page posts A44 once", async () => {
+    const { target, hook } = await setup([{ status: 404 }, { status: 404 }]);
+    const { code } = await runCheck("landing", testEnv(target, hook, { WATCH_TOKEN: "" }));
+    assert.equal(code, 1);
+    assert.equal(hook.posts.length, 1);
+    assert.match(postedText(hook.posts[0]), /^<!channel> A44 \(S2\): /);
+    assert.equal(target.requests[0].authorization, null);
+  });
+
+  test("503 cron_stale twice posts A20 with <!channel> instead of A21", async () => {
+    const { target, hook } = await setup([{ status: 503, body: "cron_stale" }]);
+    const { code, output } = await runCheck("healthz", testEnv(target, hook));
+    assert.equal(code, 1);
+    assert.equal(hook.posts.length, 1);
+    const text = postedText(hook.posts[0]);
+    assert.match(text, /^<!channel> A20 \(S2\): /);
+    assert.match(text, /Runbook: Cron Trigger not firing\./);
+    assert.doesNotMatch(text, /A21/);
+    assert.doesNotMatch(output, /cron_stale/);
+  });
+
+  test("cron_stale once and another 503 posts A21", async () => {
+    const { target, hook } = await setup([{ status: 503, body: "cron_stale" }, { status: 503, body: "maintenance" }]);
+    const { code } = await runCheck("healthz", testEnv(target, hook));
+    assert.equal(code, 1);
+    assert.match(postedText(hook.posts[0]), /^<!channel> A21 /);
+  });
+
+  // Only the exact body the dashboard sends is the Cron signal (security audit of 2026-11-21, Watch h18).
+  for (const body of ["cron_\r\nstale", "cron_stale\n", "cron_stale\r\n", "cron_stale and more", "\ncron_stale", "cron\0_stale", "cron_stale\0", `cron_stale${"\n".repeat(54)}x`]) {
+    test(`a 503 whose body is ${JSON.stringify(body)} twice posts A21, not A20`, async () => {
+      const { target, hook } = await setup([{ status: 503, body }]);
+      const { code } = await runCheck("healthz", testEnv(target, hook));
+      assert.equal(code, 1);
+      assert.match(postedText(hook.posts[0]), /^<!channel> A21 /);
+    });
+  }
+
+  test("a 503 cron_stale body on the landing page is A44, not A20", async () => {
+    const { target, hook } = await setup([{ status: 503, body: "cron_stale" }]);
+    const { code } = await runCheck("landing", testEnv(target, hook, { WATCH_TOKEN: "" }));
+    assert.equal(code, 1);
+    assert.match(postedText(hook.posts[0]), /^<!channel> A44 /);
+  });
+
+  test("no answer within the timeout counts as a failed check", async () => {
+    const { target, hook } = await setup([{ status: 200, delayMs: 3000 }]);
+    const started = Date.now();
+    const { code, output } = await runCheck("healthz", testEnv(target, hook));
+    assert.equal(code, 1);
+    assert.ok(Date.now() - started < 5000, "the script waited for the slow answer");
+    assert.equal(target.requests.length, 2);
+    assert.match(output, /healthz attempt 1: no answer\nhealthz attempt 2: no answer/);
+    assert.match(postedText(hook.posts[0]), /\(no answer, then no answer\)/);
+  });
+
+  // A response that stops after its status line, or whose body passes 1 MiB, is no answer even
+  // though curl printed the status it had received (security audit of 2026-11-21, Watch S9 a, b).
+  test("a response that sends its head and then stalls past the timeout is no answer", async () => {
+    const { target, hook } = await setup([{ status: 200, bodyDelayMs: 3000 }]);
+    const started = Date.now();
+    const { code, output } = await runCheck("healthz", testEnv(target, hook));
+    assert.equal(code, 1);
+    assert.ok(Date.now() - started < 5000, "the script waited for the stalled body");
+    assert.equal(target.requests.length, 2);
+    assert.match(output, /healthz attempt 1: no answer\nhealthz attempt 2: no answer/);
+    assert.match(postedText(hook.posts[0]), /\(no answer, then no answer\)/);
+  });
+
+  test("a 200 body of 1 MiB plus one byte is no answer on both attempts and posts", async () => {
+    const { target, hook } = await setup([{ status: 200, body: "x".repeat(1048577) }]);
+    const { code, output } = await runCheck("healthz", testEnv(target, hook));
+    assert.equal(code, 1);
+    assert.equal(target.requests.length, 2);
+    assert.match(output, /healthz attempt 1: no answer\nhealthz attempt 2: no answer/);
+    assert.equal(hook.posts.length, 1);
+    assert.match(postedText(hook.posts[0]), /^<!channel> A21 /);
+  });
+
+  test("a 200 body of exactly 1 MiB is still a good answer", async () => {
+    const { target, hook } = await setup([{ status: 200, body: "x".repeat(1048576) }]);
+    const { code, output } = await runCheck("healthz", testEnv(target, hook));
+    assert.equal(code, 0);
+    assert.equal(output.trim(), "healthz attempt 1: HTTP 200");
+    assert.equal(hook.posts.length, 0);
+  });
+
+  test("a 401 from healthz (a wrong or revoked token) posts A21 and never echoes the token", async () => {
+    const { target, hook } = await setup([{ status: 401 }]);
+    const { code, output } = await runCheck("healthz", testEnv(target, hook));
+    assert.equal(code, 1);
+    assert.equal(target.requests.length, 2);
+    assert.equal(hook.posts.length, 1);
+    const text = postedText(hook.posts[0]);
+    assert.match(text, /^<!channel> A21 \(S1\): /);
+    assert.match(text, /\(HTTP 401, then HTTP 401\)/);
+    assert.ok(!output.includes(TOKEN) && !text.includes(TOKEN));
+  });
+
+  test("a refused connection counts as a failed check", async () => {
+    const { target, hook } = await setup([{ status: 200 }]);
+    const unreachable = { ...target, url: "http://127.0.0.1:1/healthz" };
+    const { code, output } = await runCheck("healthz", testEnv(unreachable, hook));
+    assert.equal(code, 1);
+    assert.match(output, /attempt 2: no answer/);
+    assert.equal(hook.posts.length, 1);
+  });
+
+  test("a redirect is not followed and fails the check", async () => {
+    const { target, hook } = await setup([{ status: 301, location: "/elsewhere" }, { status: 301, location: "/elsewhere" }]);
+    const { code, output } = await runCheck("landing", testEnv(target, hook, { WATCH_TOKEN: "" }));
+    assert.equal(code, 1);
+    assert.deepEqual(
+      target.requests.map((request) => request.url),
+      ["/healthz", "/healthz"],
+    );
+    assert.match(output, /HTTP 301/);
+  });
+
+  test("the staging environment is named in the message", async () => {
+    const { target, hook } = await setup([{ status: 500 }]);
+    await runCheck("healthz", testEnv(target, hook, { WATCH_ENVIRONMENT: "staging" }));
+    assert.match(postedText(hook.posts[0]), /Environment: staging\./);
+  });
+
+  test("a failing webhook is reported by its status and the run still fails", async () => {
+    const { target, hook } = await setup([{ status: 500 }], 500);
+    const { code, output } = await runCheck("healthz", testEnv(target, hook));
+    assert.equal(code, 1);
+    assert.match(output, /alert post: HTTP 500/);
+  });
+
+  // Every way the alert post can fail is named in the log and the run still fails (security
+  // audit of 2026-11-21, Watch S9 d).
+  for (const [status, line] of [[403, "alert post: HTTP 403"], [404, "alert post: HTTP 404"]]) {
+    test(`a webhook that answers ${status} is reported as such and the run still fails`, async () => {
+      const { target, hook } = await setup([{ status: 500 }], status);
+      const { code, output } = await runCheck("healthz", testEnv(target, hook));
+      assert.equal(code, 1);
+      assert.equal(hook.posts.length, 1);
+      assert.match(output, new RegExp(`^${line}$`, "m"));
+    });
+  }
+
+  test("a webhook that is closed is reported as no answer and the run still fails", async () => {
+    const { target, hook } = await setup([{ status: 500 }]);
+    const closed = "http://127.0.0.1:1/services/T000/B000/HOOKSECRET9d41c7e2";
+    const { code, output } = await runCheck("healthz", testEnv(target, hook, { WATCH_WEBHOOK: closed }));
+    assert.equal(code, 1);
+    assert.equal(hook.posts.length, 0);
+    assert.match(output, /^alert post: no answer$/m);
+    assert.ok(!output.includes("HOOKSECRET9d41c7e2"));
+  });
+
+  test("every failing run posts again and a later good run posts no recovery message", async () => {
+    const { target, hook } = await setup([{ status: 500 }, { status: 500 }, { status: 500 }, { status: 500 }, { status: 200 }]);
+    assert.equal((await runCheck("healthz", testEnv(target, hook))).code, 1);
+    assert.equal((await runCheck("healthz", testEnv(target, hook))).code, 1);
+    assert.equal(hook.posts.length, 2);
+    assert.equal((await runCheck("healthz", testEnv(target, hook))).code, 0);
+    assert.equal(hook.posts.length, 2);
+  });
+});
+
+describe("secrets and the public log", () => {
+  test("neither the token nor the webhook address reaches the output or the message", async () => {
+    const { target, hook } = await setup([{ status: 500 }, { status: 503, body: "cron_stale" }]);
+    const { output } = await runCheck("healthz", testEnv(target, hook));
+    for (const secret of [TOKEN, HOOK_SECRET, "127.0.0.1", String(new URL(hook.url).port)]) {
+      assert.ok(!output.includes(secret), `the output holds ${secret}`);
+    }
+    for (const post of hook.posts) {
+      assert.ok(!post.body.includes(TOKEN) && !post.body.includes(HOOK_SECRET) && !post.body.includes("127.0.0.1"));
+    }
+  });
+
+  test("a failed run logs only HTTP statuses and the webhook status", async () => {
+    const { target, hook } = await setup([{ status: 500 }]);
+    const { output } = await runCheck("healthz", testEnv(target, hook));
+    for (const line of output.trim().split("\n")) {
+      assert.match(line, /^(healthz attempt [12]: HTTP \d{3}|alert post: HTTP \d{3})$/);
+    }
+  });
+
+  test("the script gives curl the token and the webhook through stdin, never as an argument", () => {
+    const script = readFileSync(CHECK_SCRIPT, "utf8").split("\n").filter((line) => !/^\s*#/.test(line));
+    const curlLines = script.filter((line) => line.includes("curl "));
+    assert.equal(curlLines.length, 3);
+    for (const line of curlLines) assert.doesNotMatch(line.replace(/printf '[^']*' "\$(token|webhook)" \|/, ""), /\$\{?(token|webhook|url)\b.*\bcurl|curl[^|]*\$\{?(token|webhook)\b/);
+    assert.ok(!script.some((line) => /set -[a-z]*x|xtrace|\becho\b.*\$\{?(token|webhook)\b/.test(line)));
+  });
+
+  // A webhook value may hold [ ] { } and commas, which curl would expand into several
+  // requests (security audit of 2026-11-21, Watch h17); every request turns globbing
+  // off, reads no .curlrc and uses no proxy.
+  test("every curl request takes -q, --noproxy '*' and --globoff", () => {
+    const script = readFileSync(CHECK_SCRIPT, "utf8").split("\n").filter((line) => !/^\s*#/.test(line));
+    const common = script.find((line) => /^\s*local common=\(/.test(line)) ?? "";
+    for (const option of ["-q", "--noproxy '*'", "--globoff"]) assert.ok(common.includes(` ${option} `) || common.includes(`(${option} `), `common: ${option}`);
+    // The limits that bound what a request may follow, read or fetch (security audit of
+    // 2026-11-21, Watch h20): no redirect, at most 1 MiB, only the protocol of $proto.
+    for (const option of ['--max-time "$timeout"', "--max-redirs 0", "--max-filesize 1048576", '--proto "$proto"']) assert.ok(common.includes(` ${option} `), `common: ${option}`);
+    const curlLines = script.filter((line) => line.includes("curl "));
+    assert.equal(curlLines.length, 3);
+    for (const line of curlLines) {
+      const options = line.slice(line.indexOf("curl "));
+      if (options.startsWith('curl "${common[@]}"')) continue;
+      for (const option of ["curl -q ", "--noproxy '*'", "--globoff"]) assert.ok(options.includes(option), `${option}: ${line.trim()}`);
+    }
+  });
+
+  test("the token reaches the server only as a header", async () => {
+    const { target, hook } = await setup([{ status: 200 }]);
+    await runCheck("healthz", testEnv(target, hook));
+    assert.equal(target.requests[0].url, "/healthz");
+    assert.equal(target.requests[0].authorization, `Bearer ${TOKEN}`);
+  });
+});
+
+describe("configuration errors stop the run before any request", () => {
+  const cases = [
+    ["a missing address", (env) => ({ ...env, WATCH_URL: "" }), "The address to check is not set."],
+    ["a missing webhook", (env) => ({ ...env, WATCH_WEBHOOK: "" }), "The alert webhook is not set."],
+    ["a missing token for healthz", (env) => ({ ...env, WATCH_TOKEN: "" }), "The check-in token is not set."],
+    ["an unknown environment", (env) => ({ ...env, WATCH_ENVIRONMENT: "dev" }), "WATCH_ENVIRONMENT is neither production nor staging."],
+    ["an address with a user name", (env) => ({ ...env, WATCH_URL: env.WATCH_URL.replace("://", "://user:pw@") }), "The address to check holds a user name, a query or a fragment."],
+    ["an address with a query", (env) => ({ ...env, WATCH_URL: `${env.WATCH_URL}?t=1` }), "The address to check holds a user name, a query or a fragment."],
+    ["an address with a fragment", (env) => ({ ...env, WATCH_URL: `${env.WATCH_URL}#x` }), "The address to check holds a user name, a query or a fragment."],
+    ["a token with a space", (env) => ({ ...env, WATCH_TOKEN: `${env.WATCH_TOKEN} x` }), "The check-in token holds whitespace."],
+    ["a token with a newline", (env) => ({ ...env, WATCH_TOKEN: `${env.WATCH_TOKEN}\nx` }), "The check-in token holds whitespace."],
+    ["a token with a tab", (env) => ({ ...env, WATCH_TOKEN: `${env.WATCH_TOKEN}\tx` }), "The check-in token holds whitespace."],
+    ["a webhook with a space", (env) => ({ ...env, WATCH_WEBHOOK: `${env.WATCH_WEBHOOK} x` }), "The alert webhook holds a character that is not allowed."],
+    ["a webhook with a newline", (env) => ({ ...env, WATCH_WEBHOOK: `${env.WATCH_WEBHOOK}\nx` }), "The alert webhook holds a character that is not allowed."],
+    ["an address with a space", (env) => ({ ...env, WATCH_URL: `${env.WATCH_URL} x` }), "The address to check holds a character that is not allowed."],
+    ["a webhook with braces", (env) => ({ ...env, WATCH_WEBHOOK: `${env.WATCH_WEBHOOK}/{a,b}` }), "The alert webhook holds a character that is not allowed."],
+    ["a webhook with brackets", (env) => ({ ...env, WATCH_WEBHOOK: `${env.WATCH_WEBHOOK}/[1-3]` }), "The alert webhook holds a character that is not allowed."],
+    ["a webhook with a comma", (env) => ({ ...env, WATCH_WEBHOOK: `${env.WATCH_WEBHOOK}/a,b` }), "The alert webhook holds a character that is not allowed."],
+  ];
+  for (const [name, change, message] of cases) {
+    test(name, async () => {
+      const { target, hook } = await setup([{ status: 500 }]);
+      const { code, output } = await runCheck("healthz", change(testEnv(target, hook)));
+      assert.equal(code, 2);
+      assert.equal(output.trim(), message);
+      assert.equal(target.requests.length, 0);
+      assert.equal(hook.posts.length, 0);
+    });
+  }
+
+  test("outside test mode an http address and a webhook that is not Slack's are refused", async () => {
+    const { target, hook } = await setup([{ status: 500 }]);
+    const live = { ...testEnv(target, hook), WATCH_TEST_MODE: "" };
+    const http = await runCheck("healthz", live);
+    assert.equal(http.code, 2);
+    assert.equal(http.output.trim(), "The address to check is not an https address.");
+    const webhook = await runCheck("healthz", { ...live, WATCH_URL: "https://127.0.0.1/healthz" });
+    assert.equal(webhook.code, 2);
+    assert.equal(webhook.output.trim(), "The alert webhook is not a Slack Incoming Webhook address.");
+    assert.equal(target.requests.length, 0);
+    assert.equal(hook.posts.length, 0);
+  });
+
+  test("outside test mode the timeout and the delay overrides are ignored", () => {
+    const script = readFileSync(CHECK_SCRIPT, "utf8");
+    assert.match(script, /^timeout=10$/m);
+    assert.match(script, /^retry_delay=300$/m);
+    assert.match(script, /if \[ "\$\{WATCH_TEST_MODE:-\}" = "1" \]; then\n\s+timeout="\$\{WATCH_TEST_TIMEOUT:-\$timeout\}"/);
+  });
+
+  test("an unknown check is a usage error", async () => {
+    const { target, hook } = await setup([{ status: 200 }]);
+    const { code, output } = await runCheck("bogus", testEnv(target, hook));
+    assert.equal(code, 2);
+    assert.match(output, /usage: watch-check\.sh healthz\|landing/);
+    assert.equal((await runCheck(null, testEnv(target, hook))).code, 2);
+  });
+});
+
+// The script says itself where the bearer token may go (security audit of 2026-11-21, Watch S5).
+// Outside test mode the tests put a stub `curl` first on PATH that records its call and prints
+// 200, so no request leaves the computer whatever the script decides.
+describe("the host of the bearer token", () => {
+  const LIVE_HOOK = "https://hooks.slack.com/services/T000/B000/HOOKSECRET9d41c7e2";
+  let stub;
+  beforeEach(() => {
+    stub = stubCurl();
+  });
+  afterEach(() => rmSync(stub.dir, { recursive: true, force: true }));
+  const live = (url, environment, extra = {}) => ({ PATH: stub.path, WATCH_URL: url, WATCH_TOKEN: TOKEN, WATCH_WEBHOOK: LIVE_HOOK, WATCH_ENVIRONMENT: environment, ...extra });
+  const called = () => existsSync(stub.log);
+  const MESSAGE = (environment) => `The address to check is not the healthz address of the ${environment} environment.`;
+
+  for (const [environment, url] of [["production", "https://app.emdashfleet.com/healthz"], ["staging", "https://staging.emdashfleet.com/healthz"]]) {
+    test(`the ${environment} healthz address is accepted and the check runs`, async () => {
+      const { code, output } = await runCheck("healthz", live(url, environment));
+      assert.equal(code, 0);
+      assert.equal(output.trim(), "healthz attempt 1: HTTP 200");
+      assert.ok(called(), "the stub curl was called");
+    });
+  }
+
+  for (const [name, url, environment] of [
+    ["another host", "https://evil.example/healthz", "production"],
+    ["the staging address in a production run", "https://staging.emdashfleet.com/healthz", "production"],
+    ["the production address in a staging run", "https://app.emdashfleet.com/healthz", "staging"],
+    ["the production host with another path", "https://app.emdashfleet.com/", "production"],
+    ["the production host with a port", "https://app.emdashfleet.com:8443/healthz", "production"],
+    ["a look-alike host", "https://app.emdashfleet.com.evil.example/healthz", "production"],
+    ["a trailing slash", "https://app.emdashfleet.com/healthz/", "production"],
+  ]) {
+    test(`${name} is refused for healthz outside test mode and no request is made`, async () => {
+      const { code, output } = await runCheck("healthz", live(url, environment));
+      assert.equal(code, 2);
+      assert.equal(output.trim(), MESSAGE(environment));
+      assert.ok(!called(), "curl was called");
+      assert.ok(!output.includes(TOKEN));
+    });
+  }
+
+  test("the landing check keeps its own address outside test mode (it sends no token)", async () => {
+    const { code } = await runCheck("landing", live("https://landing.example/", "staging", { WATCH_TOKEN: "" }));
+    assert.equal(code, 0);
+    assert.ok(called());
+  });
+
+  test("test mode reaches the loopback only: another host for the address or the webhook is refused", async () => {
+    const { target, hook } = await setup([{ status: 500 }]);
+    const refused = "In test mode the address and the webhook must be on 127.0.0.1 or localhost.";
+    for (const change of [
+      { WATCH_URL: "http://evil.example/healthz" },
+      { WATCH_URL: "http://127.0.0.1.evil.example/healthz" },
+      { WATCH_WEBHOOK: "http://evil.example/services/T/B/x" },
+      { WATCH_WEBHOOK: "http://127.0.0.1:80@evil.example/services/T/B/x" },
+    ]) {
+      const { code, output } = await runCheck("healthz", testEnv(target, hook, change));
+      assert.equal(code, 2, JSON.stringify(change));
+      assert.equal(output.trim(), refused);
+    }
+    assert.equal(target.requests.length, 0);
+    assert.equal(hook.posts.length, 0);
+    const local = await runCheck("healthz", testEnv(target, hook, { WATCH_URL: target.url.replace("127.0.0.1", "localhost") }));
+    assert.equal(local.code, 1, "localhost is allowed and the 500 answer fails the check");
+  });
+});
+
+describe("the job's ambient curl settings", () => {
+  test("a .curlrc and the proxy variables do not reroute the check or the alert post", async () => {
+    const home = mkdtempSync(join(tmpdir(), "watch-home-"));
+    writeFileSync(join(home, ".curlrc"), 'proxy = "http://127.0.0.1:9"\n');
+    try {
+      const { target, hook } = await setup([{ status: 500 }, { status: 500 }]);
+      const proxy = "http://127.0.0.1:9";
+      const env = testEnv(target, hook, { HOME: home, ALL_PROXY: proxy, all_proxy: proxy, HTTP_PROXY: proxy, http_proxy: proxy });
+      const { code } = await runCheck("healthz", env);
+      assert.equal(code, 1);
+      assert.equal(target.requests.length, 2);
+      assert.equal(target.requests[0].authorization, `Bearer ${TOKEN}`);
+      assert.equal(hook.posts.length, 1);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
