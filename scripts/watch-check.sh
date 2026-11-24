@@ -47,8 +47,16 @@ readonly RUNBOOK_DEPLOY="Roll back a Fleet deploy"
 
 kind="${1:-}"
 case "$kind" in
-  healthz) alert="A21"; severity="S1"; runbook="$RUNBOOK_DEPLOY"; signal="the /healthz check of the Fleet dashboard" ;;
-  landing) alert="A44"; severity="S2"; runbook="$RUNBOOK_DEPLOY"; signal="the check of the landing page" ;;
+  healthz)
+    alert="A21"; severity="S1"; runbook="$RUNBOOK_DEPLOY"; signal="the /healthz check of the Fleet dashboard"
+    title="The Fleet dashboard is down"
+    meaning="Customers cannot sign in or deploy. Their sites keep running."
+    ;;
+  landing)
+    alert="A44"; severity="S2"; runbook="$RUNBOOK_DEPLOY"; signal="the check of the landing page"
+    title="The public website is down"
+    meaning="Visitors cannot reach the marketing site or sign up."
+    ;;
   *) echo "usage: watch-check.sh healthz|landing"; exit 2 ;;
 esac
 
@@ -180,13 +188,20 @@ if [ "$code" = "200" ]; then exit 0; fi
 if [ "$first_stale" = "1" ] && [ "$stale" = "1" ]; then
   alert="A20"; severity="S2"; runbook="Cron Trigger not firing"
   signal="the Cron check-in of the Fleet dashboard (503 cron_stale)"
+  title="The dashboard's scheduled jobs have stopped"
+  meaning="The dashboard answers, but its Cron Trigger has not checked in, so health checks, alerts and maintenance are not running."
 fi
 
 # The run address is built from the runner's own variables and cleaned to the
 # characters of an address, so the message holds fixed text and numbers only.
 run_url="${GITHUB_SERVER_URL:-}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-}"
 run_url="$(printf '%s' "$run_url" | tr -cd 'A-Za-z0-9:/._-')"
-text="<!channel> $alert ($severity): $signal failed twice, 5 minutes apart ($(describe "$first_code"), then $(describe "$code")). Environment: $environment. Runbook: $runbook. Run: $run_url"
+# Fixed text and numbers only (this repository is public): the title and what it means for
+# customers, what failed, then the environment, the response time of the severity (app plan D28),
+# the runbook and the run. \n is the JSON escape of a line break.
+case "$severity" in S1) respond="Respond within 15 minutes" ;; *) respond="Respond within 1 hour" ;; esac
+if [ "$environment" = "production" ]; then where="PRODUCTION"; else where="Staging"; fi
+text="<!channel> $alert ($severity): $title ($where)\n$meaning\nWhat failed: $signal failed twice, 5 minutes apart ($(describe "$first_code"), then $(describe "$code")).\nEnvironment: $environment. $respond. Runbook: $runbook. Run: $run_url"
 printf '{"text":"%s"}' "$text" >"$work/payload"
 
 status="$(printf 'url = "%s"\n' "$webhook" | curl -q --noproxy '*' --globoff --config - --silent --max-time 10 --max-redirs 0 --proto "$proto" --request POST --header 'Content-Type: application/json' --data @"$work/payload" --output /dev/null --write-out '%{http_code}' 2>/dev/null)"

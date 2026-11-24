@@ -75,8 +75,9 @@ describe("two failed attempts", () => {
     assert.equal(hook.posts[0].method, "POST");
     assert.equal(hook.posts[0].contentType, "application/json");
     const text = postedText(hook.posts[0]);
-    assert.match(text, /^<!channel> A21 \(S1\): /);
+    assert.match(text, /^<!channel> A21 \(S1\): The Fleet dashboard is down \(PRODUCTION\)\nCustomers cannot sign in or deploy\. Their sites keep running\.\nWhat failed: the \/healthz check /);
     assert.match(text, /\(HTTP 500, then HTTP 502\)/);
+    assert.match(text, /Respond within 15 minutes\./);
     assert.match(text, /Environment: production\./);
     assert.match(text, /Runbook: Roll back a Fleet deploy\./);
     assert.match(text, /Run: https:\/\/github\.com\/emdashfleet\/EmDashFleet-Watch\/actions\/runs\/123456789$/);
@@ -98,7 +99,8 @@ describe("two failed attempts", () => {
     assert.equal(code, 1);
     assert.equal(hook.posts.length, 1);
     const text = postedText(hook.posts[0]);
-    assert.match(text, /^<!channel> A20 \(S2\): /);
+    assert.match(text, /^<!channel> A20 \(S2\): The dashboard's scheduled jobs have stopped \(PRODUCTION\)\n/);
+    assert.match(text, /Respond within 1 hour\./);
     assert.match(text, /Runbook: Cron Trigger not firing\./);
     assert.doesNotMatch(text, /A21/);
     assert.doesNotMatch(output, /cron_stale/);
@@ -205,7 +207,9 @@ describe("two failed attempts", () => {
   test("the staging environment is named in the message", async () => {
     const { target, hook } = await setup([{ status: 500 }]);
     await runCheck("healthz", testEnv(target, hook, { WATCH_ENVIRONMENT: "staging" }));
-    assert.match(postedText(hook.posts[0]), /Environment: staging\./);
+    const text = postedText(hook.posts[0]);
+    assert.match(text, /^<!channel> A21 \(S1\): The Fleet dashboard is down \(Staging\)\n/);
+    assert.match(text, /Environment: staging\./);
   });
 
   test("a failing webhook is reported by its status and the run still fails", async () => {
